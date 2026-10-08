@@ -41,6 +41,9 @@ export interface Salon {
   photos: string[] | null
   proof_url: string | null
   rejection_reason: string | null
+  correction_request: string | null
+  suspension_reason: string | null
+  is_featured: boolean
   reviewed_at: string | null
   latitude: number | null
   longitude: number | null

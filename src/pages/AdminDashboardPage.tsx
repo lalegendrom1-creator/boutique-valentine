@@ -1,8 +1,10 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Users, Scissors, CheckCircle2, XCircle, Clock, Shield,
-  LayoutDashboard, LogOut, Menu, X, MapPin, Phone, Search, Filter, Image as ImageIcon
+  LayoutDashboard, LogOut, Menu, X, MapPin, Phone, Search, 
+  Filter, Image as ImageIcon, AlertCircle, Edit, Star, Trash2,
+  CalendarDays, TrendingUp, MessageSquare
 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { useAuth } from '@/hooks/useAuth'
@@ -11,12 +13,16 @@ import type { Salon, Profile } from '@/types'
 /**
  * 🔒 SÉCURITÉ :
  * Bien que cette route soit protégée côté client (via ProtectedRoute qui vérifie role === 'admin'),
- * la VRAIE sécurité réside dans les règles RLS de la base de données (définies dans la migration 002).
+ * la VRAIE sécurité réside dans les règles RLS de la base de données (définies dans les migrations).
  * Un utilisateur malveillant ne pourra ni lire les données admin ni modifier le statut d'un salon
  * même s'il parvient à afficher cette page en modifiant le code localement.
  */
 
 type Tab = 'overview' | 'pending' | 'salons'
+type ActionModalType = 'reject' | 'correction' | 'suspend' | 'delete' | 'edit' | null
+
+// Inactivité (30 minutes)
+const INACTIVITY_TIMEOUT = 30 * 60 * 1000
 
 export default function AdminDashboardPage() {
   const { signOut } = useAuth()
@@ -27,94 +33,191 @@ export default function AdminDashboardPage() {
   const [loading, setLoading] = useState(true)
 
   // Data
-  const [stats, setStats] = useState({ clients: 0, activeSalons: 0, pendingSalons: 0 })
   const [salons, setSalons] = useState<Salon[]>([])
+  const [clientsCount, setClientsCount] = useState(0)
+  const [newClientsThisWeek, setNewClientsThisWeek] = useState(0)
+  const [newSalonsThisWeek, setNewSalonsThisWeek] = useState(0)
   
   // Filters & State
   const [statusFilter, setStatusFilter] = useState<string>('all')
+  const [cityFilter, setCityFilter] = useState<string>('all')
+  const [categoryFilter, setCategoryFilter] = useState<string>('all')
   const [searchQuery, setSearchQuery] = useState('')
-  const [selectedSalonId, setSelectedSalonId] = useState<string | null>(null)
-  const [rejectionReason, setRejectionReason] = useState('')
-  const [showRejectModal, setShowRejectModal] = useState(false)
+  
+  // Modal State
+  const [modalType, setModalType] = useState<ActionModalType>(null)
+  const [selectedSalon, setSelectedSalon] = useState<Salon | null>(null)
+  const [actionMessage, setActionMessage] = useState('')
+  const [deleteConfirmText, setDeleteConfirmText] = useState('')
+  const [editForm, setEditForm] = useState<Partial<Salon>>({})
 
-  const fetchData = async () => {
+  /* ── Déconnexion automatique ── */
+  useEffect(() => {
+    let timeoutId: NodeJS.Timeout
+
+    const resetTimer = () => {
+      clearTimeout(timeoutId)
+      timeoutId = setTimeout(async () => {
+        await signOut()
+        navigate('/login')
+      }, INACTIVITY_TIMEOUT)
+    }
+
+    const events = ['mousedown', 'mousemove', 'keypress', 'scroll', 'touchstart']
+    events.forEach(e => document.addEventListener(e, resetTimer))
+    resetTimer()
+
+    return () => {
+      clearTimeout(timeoutId)
+      events.forEach(e => document.removeEventListener(e, resetTimer))
+    }
+  }, [signOut, navigate])
+
+  /* ── Fetch Data ── */
+  const fetchData = useCallback(async () => {
     setLoading(true)
+    
+    // Calculate 7 days ago
+    const oneWeekAgo = new Date()
+    oneWeekAgo.setDate(oneWeekAgo.getDate() - 7)
+    const weekAgoStr = oneWeekAgo.toISOString()
+
     const [
-      { count: clientsCount },
-      { count: activeCount },
-      { count: pendingCount },
+      { count: totalClients },
+      { count: recentClients },
+      { count: recentSalons },
       { data: salonsData }
     ] = await Promise.all([
       supabase.from('profiles').select('*', { count: 'exact', head: true }).eq('role', 'client'),
-      supabase.from('salons').select('*', { count: 'exact', head: true }).eq('status', 'approved'),
-      supabase.from('salons').select('*', { count: 'exact', head: true }).eq('status', 'pending'),
+      supabase.from('profiles').select('*', { count: 'exact', head: true }).eq('role', 'client').gte('created_at', weekAgoStr),
+      supabase.from('salons').select('*', { count: 'exact', head: true }).gte('created_at', weekAgoStr),
       supabase.from('salons').select('*').order('created_at', { ascending: false })
     ])
 
-    setStats({
-      clients: clientsCount || 0,
-      activeSalons: activeCount || 0,
-      pendingSalons: pendingCount || 0,
-    })
+    setClientsCount(totalClients || 0)
+    setNewClientsThisWeek(recentClients || 0)
+    setNewSalonsThisWeek(recentSalons || 0)
     setSalons(salonsData as Salon[] || [])
     setLoading(false)
-  }
+  }, [])
 
   useEffect(() => {
     fetchData()
-  }, [])
+  }, [fetchData])
 
-  const handleLogout = async () => {
-    await signOut()
-    navigate('/login')
+  /* ── Derived Data ── */
+  const stats = useMemo(() => {
+    let approved = 0, pending = 0, rejected = 0, suspended = 0
+    salons.forEach(s => {
+      if (s.status === 'approved') approved++
+      else if (s.status === 'pending') pending++
+      else if (s.status === 'rejected') rejected++
+      else if (s.status === 'suspended') suspended++
+    })
+    return { approved, pending, rejected, suspended }
+  }, [salons])
+
+  const pendingSalonsList = useMemo(() => {
+    // Les plus anciens en premier pour traitement
+    return salons.filter(s => s.status === 'pending').sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+  }, [salons])
+
+  const recentSalonsList = useMemo(() => {
+    // Les 5 plus récents
+    return [...salons].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()).slice(0, 5)
+  }, [salons])
+
+  const filteredSalons = useMemo(() => {
+    return salons.filter(s => {
+      if (statusFilter !== 'all' && s.status !== statusFilter) return false
+      if (cityFilter !== 'all' && s.city !== cityFilter) return false
+      if (categoryFilter !== 'all' && (!s.categories || !s.categories.includes(categoryFilter))) return false
+      
+      if (searchQuery) {
+        const q = searchQuery.toLowerCase()
+        return s.name.toLowerCase().includes(q) || (s.city || '').toLowerCase().includes(q)
+      }
+      return true
+    })
+  }, [salons, statusFilter, cityFilter, categoryFilter, searchQuery])
+
+  // Lists for filters
+  const uniqueCities = useMemo(() => Array.from(new Set(salons.map(s => s.city).filter(Boolean))) as string[], [salons])
+  const uniqueCategories = useMemo(() => {
+    const cats = new Set<string>()
+    salons.forEach(s => s.categories?.forEach(c => cats.add(c)))
+    return Array.from(cats)
+  }, [salons])
+
+  /* ── Handlers ── */
+  const closeModal = () => {
+    setModalType(null)
+    setSelectedSalon(null)
+    setActionMessage('')
+    setDeleteConfirmText('')
+    setEditForm({})
   }
 
-  const updateSalonStatus = async (id: string, status: Salon['status'], reason: string | null = null) => {
-    const { error } = await supabase
-      .from('salons')
-      .update({ 
-        status, 
-        rejection_reason: reason,
-        reviewed_at: new Date().toISOString()
-      })
-      .eq('id', id)
+  const handleAction = async () => {
+    if (!selectedSalon) return
+    
+    try {
+      if (modalType === 'reject') {
+        if (!actionMessage.trim()) return alert("Le motif de refus est obligatoire.")
+        await supabase.from('salons').update({ status: 'rejected', rejection_reason: actionMessage, reviewed_at: new Date().toISOString() }).eq('id', selectedSalon.id)
+      } 
+      else if (modalType === 'correction') {
+        if (!actionMessage.trim()) return alert("Le message est obligatoire.")
+        // Reste pending, mais ajoute le message
+        await supabase.from('salons').update({ correction_request: actionMessage, reviewed_at: new Date().toISOString() }).eq('id', selectedSalon.id)
+      }
+      else if (modalType === 'suspend') {
+        if (!actionMessage.trim()) return alert("Le motif est obligatoire.")
+        await supabase.from('salons').update({ status: 'suspended', suspension_reason: actionMessage, reviewed_at: new Date().toISOString() }).eq('id', selectedSalon.id)
+      }
+      else if (modalType === 'delete') {
+        if (deleteConfirmText !== selectedSalon.name) return alert("Le nom saisi ne correspond pas.")
+        await supabase.from('salons').delete().eq('id', selectedSalon.id)
+      }
+      else if (modalType === 'edit') {
+        await supabase.from('salons').update({ 
+          name: editForm.name,
+          city: editForm.city,
+          phone: editForm.phone,
+          whatsapp: editForm.whatsapp,
+        }).eq('id', selectedSalon.id)
+      }
 
-    if (!error) {
-      fetchData() // Refresh data to update stats and lists
-      setShowRejectModal(false)
-      setRejectionReason('')
-      setSelectedSalonId(null)
-    } else {
-      alert(`Erreur: ${error.message}`)
+      fetchData()
+      closeModal()
+    } catch (e: any) {
+      alert(`Erreur : ${e.message}`)
     }
   }
 
-  const openRejectModal = (id: string) => {
-    setSelectedSalonId(id)
-    setShowRejectModal(true)
+  const directAction = async (salonId: string, action: 'approve' | 'reactivate' | 'toggle_feature', currentFeaturedValue = false) => {
+    try {
+      if (action === 'approve') {
+        await supabase.from('salons').update({ status: 'approved', rejection_reason: null, correction_request: null, suspension_reason: null, reviewed_at: new Date().toISOString() }).eq('id', salonId)
+      } else if (action === 'reactivate') {
+        await supabase.from('salons').update({ status: 'approved', suspension_reason: null, reviewed_at: new Date().toISOString() }).eq('id', salonId)
+      } else if (action === 'toggle_feature') {
+        await supabase.from('salons').update({ is_featured: !currentFeaturedValue }).eq('id', salonId)
+      }
+      fetchData()
+    } catch (e: any) {
+      alert(`Erreur : ${e.message}`)
+    }
   }
 
-  const confirmReject = () => {
-    if (!rejectionReason.trim()) {
-      alert("Le motif de refus est obligatoire.")
-      return
-    }
-    if (selectedSalonId) {
-      updateSalonStatus(selectedSalonId, 'rejected', rejectionReason)
-    }
+  const removePhoto = async (salonId: string, photos: string[], photoToRemove: string) => {
+    if (!window.confirm("Retirer cette photo ?")) return
+    const newPhotos = photos.filter(p => p !== photoToRemove)
+    await supabase.from('salons').update({ photos: newPhotos.length > 0 ? newPhotos : null }).eq('id', salonId)
+    fetchData()
   }
 
-  // Derived lists
-  const pendingSalonsList = salons.filter(s => s.status === 'pending')
-  const filteredSalons = salons.filter(s => {
-    if (statusFilter !== 'all' && s.status !== statusFilter) return false
-    if (searchQuery) {
-      const q = searchQuery.toLowerCase()
-      return s.name.toLowerCase().includes(q) || (s.city || '').toLowerCase().includes(q)
-    }
-    return true
-  })
-
+  /* ── Renderers ── */
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-neutral-50">
@@ -163,11 +266,11 @@ export default function AdminDashboardPage() {
             }`}
           >
             <div className="flex items-center gap-3">
-              <Clock className="w-5 h-5" /> Demandes
+              <Clock className="w-5 h-5" /> Demandes d'inscription
             </div>
-            {stats.pendingSalons > 0 && (
-              <span className="bg-amber-100 text-amber-700 py-0.5 px-2 rounded-full text-xs">
-                {stats.pendingSalons}
+            {stats.pending > 0 && (
+              <span className="bg-amber-100 text-amber-700 py-0.5 px-2 rounded-full text-xs font-bold shadow-sm border border-amber-200">
+                {stats.pending}
               </span>
             )}
           </button>
@@ -178,13 +281,13 @@ export default function AdminDashboardPage() {
               tab === 'salons' ? 'bg-primary-50 text-primary-700' : 'text-neutral-600 hover:bg-neutral-100'
             }`}
           >
-            <Scissors className="w-5 h-5" /> Tous les salons
+            <Scissors className="w-5 h-5" /> Gestion des salons
           </button>
         </nav>
 
         <div className="p-4 border-t border-neutral-200 mt-auto md:absolute md:bottom-0 md:w-full bg-white">
           <button
-            onClick={handleLogout}
+            onClick={() => { signOut(); navigate('/login') }}
             className="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium text-red-600 hover:bg-red-50 transition-colors"
           >
             <LogOut className="w-5 h-5" /> Déconnexion
@@ -195,103 +298,174 @@ export default function AdminDashboardPage() {
       {/* Main Content */}
       <main className="flex-1 p-4 md:p-8 min-w-0 max-h-screen overflow-y-auto">
         
+        {/* ========================================================= */}
         {/* TAB : OVERVIEW */}
+        {/* ========================================================= */}
         {tab === 'overview' && (
           <div className="space-y-6 animate-fade-in">
-            <h2 className="text-2xl font-bold text-neutral-900">Vue d'ensemble</h2>
+            <h2 className="text-2xl font-bold text-neutral-900">Tableau de bord</h2>
             
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              {/* Demandes en attente - Bien visible */}
-              <div className="card p-6 bg-gradient-to-br from-amber-500 to-amber-600 text-white relative overflow-hidden shadow-lg shadow-amber-500/20">
-                <div className="relative z-10">
-                  <div className="flex items-center gap-3 mb-4 opacity-90">
-                    <Clock className="w-6 h-6" />
-                    <h3 className="font-medium text-lg">Demandes en attente</h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+              {/* Demandes en attente - Mises en avant */}
+              <button 
+                onClick={() => setTab('pending')}
+                className="col-span-1 md:col-span-2 lg:col-span-4 card p-6 bg-gradient-to-br from-amber-500 to-amber-600 text-white relative overflow-hidden shadow-lg shadow-amber-500/20 text-left hover:scale-[1.01] transition-transform"
+              >
+                <div className="relative z-10 flex items-center justify-between">
+                  <div>
+                    <div className="flex items-center gap-3 mb-2 opacity-90">
+                      <Clock className="w-6 h-6" />
+                      <h3 className="font-medium text-lg">Demandes en attente</h3>
+                    </div>
+                    <div className="text-5xl font-bold">{stats.pending}</div>
                   </div>
-                  <div className="text-5xl font-bold mb-4">{stats.pendingSalons}</div>
-                  <button 
-                    onClick={() => setTab('pending')}
-                    className="inline-flex items-center gap-2 text-sm font-medium bg-white/20 hover:bg-white/30 px-4 py-2 rounded-full transition"
-                  >
-                    Voir les demandes
-                  </button>
+                  <div className="hidden sm:block text-amber-100/50">
+                    <Clock className="w-24 h-24" />
+                  </div>
                 </div>
-                <Clock className="absolute -right-6 -bottom-6 w-40 h-40 opacity-10" />
+              </button>
+
+              {/* Salons */}
+              <div className="card p-5 border-t-4 border-t-green-500">
+                <p className="text-sm font-medium text-neutral-500 mb-1">Salons Approuvés</p>
+                <p className="text-3xl font-bold text-neutral-900">{stats.approved}</p>
+              </div>
+              <div className="card p-5 border-t-4 border-t-red-500">
+                <p className="text-sm font-medium text-neutral-500 mb-1">Salons Refusés</p>
+                <p className="text-3xl font-bold text-neutral-900">{stats.rejected}</p>
+              </div>
+              <div className="card p-5 border-t-4 border-t-orange-500">
+                <p className="text-sm font-medium text-neutral-500 mb-1">Salons Suspendus</p>
+                <p className="text-3xl font-bold text-neutral-900">{stats.suspended}</p>
+              </div>
+              
+              {/* Clientes */}
+              <div className="card p-5 border-t-4 border-t-blue-500">
+                <p className="text-sm font-medium text-neutral-500 mb-1">Clientes Inscrites</p>
+                <p className="text-3xl font-bold text-neutral-900">{clientsCount}</p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
+              {/* Activité semaine */}
+              <div className="card p-6">
+                <h3 className="font-bold text-lg text-neutral-900 mb-4 flex items-center gap-2">
+                  <TrendingUp className="w-5 h-5 text-primary-500" /> Nouveautés cette semaine
+                </h3>
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between p-4 bg-blue-50 rounded-xl border border-blue-100">
+                    <div className="flex items-center gap-3 text-blue-800">
+                      <Users className="w-5 h-5" />
+                      <span className="font-medium">Nouvelles clientes</span>
+                    </div>
+                    <span className="text-2xl font-bold text-blue-600">+{newClientsThisWeek}</span>
+                  </div>
+                  <div className="flex items-center justify-between p-4 bg-primary-50 rounded-xl border border-primary-100">
+                    <div className="flex items-center gap-3 text-primary-800">
+                      <Scissors className="w-5 h-5" />
+                      <span className="font-medium">Nouveaux salons inscrits</span>
+                    </div>
+                    <span className="text-2xl font-bold text-primary-600">+{newSalonsThisWeek}</span>
+                  </div>
+                </div>
               </div>
 
-              {/* Salons actifs */}
-              <div className="card p-6 border-l-4 border-l-green-500">
-                <div className="flex items-center gap-3 mb-2 text-neutral-500">
-                  <Scissors className="w-5 h-5 text-green-500" />
-                  <h3 className="font-medium">Salons actifs</h3>
+              {/* Les 5 dernières demandes */}
+              <div className="card p-6">
+                <h3 className="font-bold text-lg text-neutral-900 mb-4 flex items-center gap-2">
+                  <CalendarDays className="w-5 h-5 text-neutral-500" /> Les 5 dernières inscriptions
+                </h3>
+                <div className="space-y-3">
+                  {recentSalonsList.length === 0 ? (
+                    <p className="text-neutral-500 text-sm">Aucune inscription récente.</p>
+                  ) : (
+                    recentSalonsList.map(s => (
+                      <div key={s.id} className="flex items-center justify-between p-3 rounded-lg border border-neutral-100 hover:bg-neutral-50">
+                        <div>
+                          <p className="font-medium text-sm text-neutral-900">{s.name}</p>
+                          <p className="text-xs text-neutral-500">{new Date(s.created_at).toLocaleDateString('fr-FR')}</p>
+                        </div>
+                        <div>
+                          {s.status === 'pending' && <span className="badge bg-amber-100 text-amber-700 text-[10px]">En attente</span>}
+                          {s.status === 'approved' && <span className="badge bg-green-100 text-green-700 text-[10px]">Approuvé</span>}
+                          {s.status === 'rejected' && <span className="badge bg-red-100 text-red-700 text-[10px]">Refusé</span>}
+                          {s.status === 'suspended' && <span className="badge bg-orange-100 text-orange-700 text-[10px]">Suspendu</span>}
+                        </div>
+                      </div>
+                    ))
+                  )}
                 </div>
-                <div className="text-4xl font-bold text-neutral-900">{stats.activeSalons}</div>
-              </div>
-
-              {/* Clientes inscrites */}
-              <div className="card p-6 border-l-4 border-l-blue-500">
-                <div className="flex items-center gap-3 mb-2 text-neutral-500">
-                  <Users className="w-5 h-5 text-blue-500" />
-                  <h3 className="font-medium">Clientes inscrites</h3>
-                </div>
-                <div className="text-4xl font-bold text-neutral-900">{stats.clients}</div>
               </div>
             </div>
           </div>
         )}
 
+        {/* ========================================================= */}
         {/* TAB : PENDING REQUESTS */}
+        {/* ========================================================= */}
         {tab === 'pending' && (
           <div className="space-y-6 animate-fade-in">
-            <h2 className="text-2xl font-bold text-neutral-900">Demandes d'inscription</h2>
+            <div className="flex items-center justify-between">
+              <h2 className="text-2xl font-bold text-neutral-900">Demandes d'inscription</h2>
+              <span className="text-sm text-neutral-500">Triées de la plus ancienne à la plus récente</span>
+            </div>
             
             {pendingSalonsList.length === 0 ? (
               <div className="card p-12 text-center">
                 <CheckCircle2 className="w-16 h-16 text-green-400 mx-auto mb-4" />
                 <h3 className="text-lg font-medium text-neutral-900">Toutes les demandes ont été traitées</h3>
-                <p className="text-neutral-500 mt-2">Aucun salon en attente de validation.</p>
               </div>
             ) : (
               <div className="space-y-6">
                 {pendingSalonsList.map(salon => (
-                  <div key={salon.id} className="card overflow-hidden">
+                  <div key={salon.id} className="card overflow-hidden border-amber-200">
                     <div className="p-6 md:p-8">
-                      <div className="flex flex-col md:flex-row justify-between gap-6">
+                      <div className="flex flex-col xl:flex-row gap-6">
                         
-                        {/* Infos principales */}
-                        <div className="flex-1 space-y-4">
+                        {/* Infos */}
+                        <div className="flex-1 space-y-5">
                           <div>
                             <div className="flex items-center gap-3 mb-1">
                               <h3 className="text-xl font-bold text-neutral-900">{salon.name}</h3>
-                              <span className="badge bg-amber-100 text-amber-700">En attente</span>
+                              <span className="badge bg-amber-100 text-amber-700 border border-amber-200">Nouveau dossier</span>
                             </div>
-                            <p className="text-neutral-500 text-sm">Soumis le {new Date(salon.created_at).toLocaleDateString('fr-FR')}</p>
+                            <p className="text-neutral-500 text-sm">Soumis le {new Date(salon.created_at).toLocaleString('fr-FR')}</p>
                           </div>
 
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+                          {salon.correction_request && (
+                            <div className="bg-amber-50 border border-amber-200 p-3 rounded-lg text-sm text-amber-800 flex items-start gap-2">
+                              <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                              <div>
+                                <strong>Corrections demandées :</strong> {salon.correction_request}
+                              </div>
+                            </div>
+                          )}
+
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm bg-neutral-50 p-4 rounded-xl border border-neutral-100">
                             <div>
-                              <p className="text-neutral-400 mb-1">Responsable</p>
-                              <p className="font-medium text-neutral-900">{salon.manager_name || 'Non renseigné'}</p>
+                              <p className="text-neutral-400 text-xs uppercase font-bold mb-1">Responsable</p>
+                              <p className="font-medium text-neutral-900">{salon.manager_name || '—'}</p>
                             </div>
                             <div>
-                              <p className="text-neutral-400 mb-1">Localisation</p>
+                              <p className="text-neutral-400 text-xs uppercase font-bold mb-1">Localisation</p>
                               <p className="font-medium text-neutral-900 flex items-center gap-1.5">
-                                <MapPin className="w-4 h-4 text-neutral-400" /> 
+                                <MapPin className="w-3.5 h-3.5 text-neutral-400" /> 
+                                {salon.address}<br/>
                                 {salon.city} {salon.district ? `- ${salon.district}` : ''}
                               </p>
                             </div>
                             <div>
-                              <p className="text-neutral-400 mb-1">Contact</p>
-                              <p className="font-medium text-neutral-900 flex items-center gap-1.5">
-                                <Phone className="w-4 h-4 text-neutral-400" />
-                                {salon.phone} {salon.whatsapp ? `(WA: ${salon.whatsapp})` : ''}
+                              <p className="text-neutral-400 text-xs uppercase font-bold mb-1">Contact</p>
+                              <p className="font-medium text-neutral-900 flex flex-col gap-0.5">
+                                <span className="flex items-center gap-1.5"><Phone className="w-3.5 h-3.5 text-neutral-400" /> {salon.phone || '—'}</span>
+                                {salon.whatsapp && <span className="text-green-600 flex items-center gap-1.5 ml-5">WhatsApp: {salon.whatsapp}</span>}
                               </p>
                             </div>
                             <div>
-                              <p className="text-neutral-400 mb-1">Catégories</p>
-                              <div className="flex flex-wrap gap-1.5">
+                              <p className="text-neutral-400 text-xs uppercase font-bold mb-1">Catégories</p>
+                              <div className="flex flex-wrap gap-1">
                                 {salon.categories?.map((cat, i) => (
-                                  <span key={i} className="bg-neutral-100 text-neutral-600 px-2 py-0.5 rounded-full text-xs">
+                                  <span key={i} className="bg-white border border-neutral-200 text-neutral-700 px-2 py-0.5 rounded-full text-xs">
                                     {cat}
                                   </span>
                                 )) || <span className="text-neutral-500">Aucune</span>}
@@ -301,15 +475,22 @@ export default function AdminDashboardPage() {
 
                           {salon.description && (
                             <div>
-                              <p className="text-neutral-400 text-sm mb-1">Description</p>
-                              <p className="text-sm text-neutral-700 bg-neutral-50 p-3 rounded-xl">{salon.description}</p>
+                              <p className="text-neutral-400 text-xs uppercase font-bold mb-1">Description</p>
+                              <p className="text-sm text-neutral-700 bg-white border border-neutral-100 p-3 rounded-lg leading-relaxed">{salon.description}</p>
+                            </div>
+                          )}
+                          
+                          {salon.opening_hours && (
+                            <div>
+                              <p className="text-neutral-400 text-xs uppercase font-bold mb-1">Horaires</p>
+                              <p className="text-sm text-neutral-700 bg-white border border-neutral-100 p-3 rounded-lg whitespace-pre-wrap">{salon.opening_hours}</p>
                             </div>
                           )}
 
                           {salon.proof_url && (
                             <div>
-                              <p className="text-neutral-400 text-sm mb-1">Lien fourni (RS)</p>
-                              <a href={salon.proof_url} target="_blank" rel="noopener noreferrer" className="text-primary-600 text-sm hover:underline">
+                              <p className="text-neutral-400 text-xs uppercase font-bold mb-1">Réseaux Sociaux / Lien</p>
+                              <a href={salon.proof_url} target="_blank" rel="noopener noreferrer" className="text-primary-600 text-sm hover:underline font-medium">
                                 {salon.proof_url}
                               </a>
                             </div>
@@ -317,20 +498,20 @@ export default function AdminDashboardPage() {
                         </div>
 
                         {/* Photos */}
-                        <div className="md:w-72 flex-shrink-0">
-                          <p className="text-neutral-400 text-sm mb-2 flex items-center gap-1.5">
+                        <div className="xl:w-80 flex-shrink-0">
+                          <p className="text-neutral-400 text-xs uppercase font-bold mb-2 flex items-center gap-1.5">
                             <ImageIcon className="w-4 h-4" /> Photos du salon
                           </p>
                           {salon.photos && salon.photos.length > 0 ? (
                             <div className="grid grid-cols-2 gap-2">
                               {salon.photos.map((photo, i) => (
-                                <a key={i} href={photo} target="_blank" rel="noopener noreferrer" className="block aspect-square rounded-lg overflow-hidden border border-neutral-200 hover:opacity-90 transition">
+                                <a key={i} href={photo} target="_blank" rel="noopener noreferrer" className="block aspect-square rounded-lg overflow-hidden border border-neutral-200 hover:opacity-90 transition shadow-sm">
                                   <img src={photo} alt="Salon" className="w-full h-full object-cover" />
                                 </a>
                               ))}
                             </div>
                           ) : (
-                            <div className="bg-neutral-50 rounded-xl aspect-video flex items-center justify-center text-neutral-400 text-sm border border-neutral-200">
+                            <div className="bg-neutral-50 rounded-xl aspect-video flex items-center justify-center text-neutral-400 text-sm border border-neutral-200 border-dashed">
                               Aucune photo
                             </div>
                           )}
@@ -339,19 +520,25 @@ export default function AdminDashboardPage() {
                       </div>
                     </div>
                     
-                    {/* Actions de validation */}
-                    <div className="bg-neutral-50 border-t border-neutral-200 p-4 md:px-8 flex flex-wrap gap-3 justify-end">
+                    {/* Actions */}
+                    <div className="bg-neutral-50 border-t border-neutral-200 p-4 md:px-8 flex flex-wrap gap-3 justify-end items-center">
                       <button 
-                        onClick={() => openRejectModal(salon.id)}
-                        className="btn-secondary text-red-600 hover:text-red-700 hover:border-red-200 hover:bg-red-50"
+                        onClick={() => { setSelectedSalon(salon); setModalType('reject') }}
+                        className="btn-ghost text-red-600 hover:text-red-700 hover:bg-red-50 text-sm"
                       >
                         <XCircle className="w-4 h-4" /> Refuser
                       </button>
                       <button 
-                        onClick={() => updateSalonStatus(salon.id, 'approved')}
-                        className="btn-primary bg-green-600 hover:bg-green-700 shadow-green-600/20"
+                        onClick={() => { setSelectedSalon(salon); setModalType('correction') }}
+                        className="btn-secondary text-amber-600 hover:text-amber-700 border-amber-200 hover:border-amber-300 text-sm"
                       >
-                        <CheckCircle2 className="w-4 h-4" /> Approuver le salon
+                        <MessageSquare className="w-4 h-4" /> Demander corrections
+                      </button>
+                      <button 
+                        onClick={() => directAction(salon.id, 'approve')}
+                        className="btn-primary bg-green-600 hover:bg-green-700 shadow-green-600/20 text-sm"
+                      >
+                        <CheckCircle2 className="w-4 h-4" /> Accepter le salon
                       </button>
                     </div>
                   </div>
@@ -361,35 +548,59 @@ export default function AdminDashboardPage() {
           </div>
         )}
 
+        {/* ========================================================= */}
         {/* TAB : TOUS LES SALONS */}
+        {/* ========================================================= */}
         {tab === 'salons' && (
           <div className="space-y-6 animate-fade-in">
-            <h2 className="text-2xl font-bold text-neutral-900">Gestion des salons</h2>
+            <h2 className="text-2xl font-bold text-neutral-900">Gestion de tous les salons</h2>
             
             {/* Filtres et recherche */}
-            <div className="flex flex-col md:flex-row gap-4">
-              <div className="relative flex-1">
+            <div className="card p-4 flex flex-col md:flex-row gap-4 flex-wrap">
+              <div className="relative flex-1 min-w-[200px]">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-400" />
                 <input
                   type="text"
-                  placeholder="Rechercher par nom, ville..."
+                  placeholder="Recherche (nom, ville)..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   className="input pl-10"
                 />
               </div>
-              <div className="relative w-full md:w-64">
+              <div className="relative w-full md:w-48">
                 <Filter className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-400" />
                 <select
                   value={statusFilter}
                   onChange={(e) => setStatusFilter(e.target.value)}
                   className="input pl-10 appearance-none bg-white"
                 >
-                  <option value="all">Tous les statuts</option>
+                  <option value="all">Tous statuts</option>
                   <option value="approved">Approuvés</option>
                   <option value="pending">En attente</option>
                   <option value="suspended">Suspendus</option>
                   <option value="rejected">Refusés</option>
+                </select>
+              </div>
+              <div className="relative w-full md:w-48">
+                <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-400" />
+                <select
+                  value={cityFilter}
+                  onChange={(e) => setCityFilter(e.target.value)}
+                  className="input pl-10 appearance-none bg-white"
+                >
+                  <option value="all">Toutes les villes</option>
+                  {uniqueCities.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </div>
+              <div className="relative w-full md:w-48">
+                <Scissors className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-400" />
+                <select
+                  value={categoryFilter}
+                  onChange={(e) => setCategoryFilter(e.target.value)}
+                  className="input pl-10 appearance-none bg-white"
+                >
+                  <option value="all">Toutes les catégories</option>
+                  {uniqueCategories.map(c => <option key={c} value={c}>{c}</option>)}
                 </select>
               </div>
             </div>
@@ -400,55 +611,105 @@ export default function AdminDashboardPage() {
                 <table className="w-full text-sm text-left">
                   <thead className="bg-neutral-50 text-neutral-500 border-b border-neutral-200">
                     <tr>
-                      <th className="px-6 py-4 font-medium">Nom du salon</th>
-                      <th className="px-6 py-4 font-medium">Localisation</th>
-                      <th className="px-6 py-4 font-medium">Contact</th>
-                      <th className="px-6 py-4 font-medium">Statut</th>
-                      <th className="px-6 py-4 font-medium text-right">Actions</th>
+                      <th className="px-4 py-4 font-medium">Salon</th>
+                      <th className="px-4 py-4 font-medium">Localisation & Contact</th>
+                      <th className="px-4 py-4 font-medium">Statut & Badge</th>
+                      <th className="px-4 py-4 font-medium">Photos</th>
+                      <th className="px-4 py-4 font-medium text-right">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-neutral-100">
                     {filteredSalons.map(salon => (
                       <tr key={salon.id} className="hover:bg-neutral-50/50">
-                        <td className="px-6 py-4">
-                          <div className="font-medium text-neutral-900">{salon.name}</div>
-                          <div className="text-xs text-neutral-500 mt-1">{salon.manager_name}</div>
+                        {/* Salon Name */}
+                        <td className="px-4 py-4 align-top">
+                          <div className="font-bold text-neutral-900 text-base">{salon.name}</div>
+                          <div className="text-xs text-neutral-500 mt-1">Resp: {salon.manager_name || '—'}</div>
+                          <div className="text-xs text-neutral-400 mt-1">Inscrit: {new Date(salon.created_at).toLocaleDateString('fr-FR')}</div>
                         </td>
-                        <td className="px-6 py-4 text-neutral-600">
-                          {salon.city}
+                        
+                        {/* Location */}
+                        <td className="px-4 py-4 align-top">
+                          <div className="text-neutral-700 font-medium">{salon.city} {salon.district ? `(${salon.district})` : ''}</div>
+                          <div className="text-xs text-neutral-500 mt-1">{salon.phone}</div>
+                          {salon.whatsapp && <div className="text-xs text-green-600 mt-0.5">WA: {salon.whatsapp}</div>}
                         </td>
-                        <td className="px-6 py-4 text-neutral-600">
-                          {salon.phone}
-                        </td>
-                        <td className="px-6 py-4">
-                          {salon.status === 'approved' && <span className="badge bg-green-100 text-green-700">Approuvé</span>}
-                          {salon.status === 'pending' && <span className="badge bg-amber-100 text-amber-700">En attente</span>}
-                          {salon.status === 'suspended' && <span className="badge bg-orange-100 text-orange-700">Suspendu</span>}
-                          {salon.status === 'rejected' && <span className="badge bg-red-100 text-red-700">Refusé</span>}
-                        </td>
-                        <td className="px-6 py-4 text-right">
-                          {salon.status === 'approved' ? (
+                        
+                        {/* Status & Badge */}
+                        <td className="px-4 py-4 align-top">
+                          <div className="flex flex-col gap-2 items-start">
+                            {salon.status === 'approved' && <span className="badge bg-green-100 text-green-700">Approuvé</span>}
+                            {salon.status === 'pending' && <span className="badge bg-amber-100 text-amber-700">En attente</span>}
+                            {salon.status === 'suspended' && <span className="badge bg-orange-100 text-orange-700" title={salon.suspension_reason || ''}>Suspendu</span>}
+                            {salon.status === 'rejected' && <span className="badge bg-red-100 text-red-700">Refusé</span>}
+                            
                             <button 
-                              onClick={() => updateSalonStatus(salon.id, 'suspended', 'Suspendu par l\'administrateur.')}
-                              className="text-orange-600 hover:text-orange-800 font-medium text-xs px-3 py-1.5 rounded-lg hover:bg-orange-50 transition"
+                              onClick={() => directAction(salon.id, 'toggle_feature', salon.is_featured)}
+                              className={`badge cursor-pointer transition ${salon.is_featured ? 'bg-primary-100 text-primary-700 border border-primary-200' : 'bg-neutral-100 text-neutral-400 hover:bg-neutral-200'}`}
+                              title="Activez pour remonter ce salon en haut de la liste client."
                             >
-                              Suspendre
+                              <Star className={`w-3 h-3 ${salon.is_featured ? 'fill-primary-500' : ''}`} /> Recommandé
                             </button>
-                          ) : salon.status === 'suspended' ? (
+                          </div>
+                        </td>
+
+                        {/* Photos */}
+                        <td className="px-4 py-4 align-top">
+                          {salon.photos && salon.photos.length > 0 ? (
+                            <div className="flex flex-wrap gap-1">
+                              {salon.photos.map((p, i) => (
+                                <div key={i} className="relative group w-10 h-10 rounded overflow-hidden border border-neutral-200">
+                                  <img src={p} className="w-full h-full object-cover" alt="" />
+                                  <button 
+                                    onClick={() => removePhoto(salon.id, salon.photos!, p)}
+                                    className="absolute inset-0 bg-red-500/80 hidden group-hover:flex items-center justify-center text-white"
+                                    title="Supprimer la photo"
+                                  >
+                                    <X className="w-4 h-4" />
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <span className="text-xs text-neutral-400">Aucune</span>
+                          )}
+                        </td>
+                        
+                        {/* Actions */}
+                        <td className="px-4 py-4 align-top text-right">
+                          <div className="flex flex-wrap justify-end gap-2">
                             <button 
-                              onClick={() => updateSalonStatus(salon.id, 'approved')}
-                              className="text-green-600 hover:text-green-800 font-medium text-xs px-3 py-1.5 rounded-lg hover:bg-green-50 transition"
+                              onClick={() => { setSelectedSalon(salon); setEditForm(salon); setModalType('edit') }}
+                              className="p-1.5 text-blue-600 hover:bg-blue-50 rounded" title="Modifier infos rapides"
                             >
-                              Réactiver
+                              <Edit className="w-4 h-4" />
                             </button>
-                          ) : salon.status === 'rejected' ? (
+                            
+                            {salon.status === 'approved' && (
+                              <button 
+                                onClick={() => { setSelectedSalon(salon); setModalType('suspend') }}
+                                className="p-1.5 text-orange-600 hover:bg-orange-50 rounded" title="Suspendre"
+                              >
+                                <AlertCircle className="w-4 h-4" />
+                              </button>
+                            )}
+                            
+                            {salon.status === 'suspended' && (
+                              <button 
+                                onClick={() => directAction(salon.id, 'reactivate')}
+                                className="p-1.5 text-green-600 hover:bg-green-50 rounded" title="Réactiver"
+                              >
+                                <CheckCircle2 className="w-4 h-4" />
+                              </button>
+                            )}
+
                             <button 
-                              onClick={() => updateSalonStatus(salon.id, 'pending')}
-                              className="text-amber-600 hover:text-amber-800 font-medium text-xs px-3 py-1.5 rounded-lg hover:bg-amber-50 transition"
+                              onClick={() => { setSelectedSalon(salon); setModalType('delete') }}
+                              className="p-1.5 text-red-600 hover:bg-red-50 rounded" title="Supprimer définitivement"
                             >
-                              Re-examiner
+                              <Trash2 className="w-4 h-4" />
                             </button>
-                          ) : null}
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -467,38 +728,97 @@ export default function AdminDashboardPage() {
         )}
       </main>
 
-      {/* Modal Motif de Refus */}
-      {showRejectModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm animate-in fade-in">
-          <div className="card w-full max-w-md p-6 animate-scale-in">
-            <h3 className="text-xl font-bold text-neutral-900 mb-2">Motif du refus</h3>
-            <p className="text-neutral-500 text-sm mb-4">
-              Ce motif sera affiché au propriétaire du salon pour qu'il puisse corriger son dossier.
-            </p>
-            <textarea
-              className="input min-h-[100px] mb-6"
-              placeholder="Ex: Les photos ne sont pas claires, ou la ville n'est pas desservie..."
-              value={rejectionReason}
-              onChange={(e) => setRejectionReason(e.target.value)}
-              autoFocus
-            />
-            <div className="flex gap-3 justify-end">
-              <button 
-                onClick={() => {
-                  setShowRejectModal(false)
-                  setRejectionReason('')
-                }}
-                className="btn-ghost"
-              >
-                Annuler
-              </button>
-              <button 
-                onClick={confirmReject}
-                className="btn-primary bg-red-600 hover:bg-red-700 shadow-red-600/20"
-              >
-                Confirmer le refus
-              </button>
-            </div>
+      {/* ========================================================= */}
+      {/* MODALS UNIFIÉS */}
+      {/* ========================================================= */}
+      {modalType && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in">
+          <div className="card w-full max-w-md p-6 animate-scale-in max-h-[90vh] overflow-y-auto">
+            
+            {/* Modal: REFUS */}
+            {modalType === 'reject' && (
+              <>
+                <h3 className="text-xl font-bold text-neutral-900 mb-2">Motif du refus</h3>
+                <p className="text-neutral-500 text-sm mb-4">Ce motif sera affiché au salon.</p>
+                <textarea className="input min-h-[100px] mb-6" value={actionMessage} onChange={e => setActionMessage(e.target.value)} autoFocus />
+                <div className="flex gap-3 justify-end">
+                  <button onClick={closeModal} className="btn-ghost">Annuler</button>
+                  <button onClick={handleAction} className="btn-primary bg-red-600 hover:bg-red-700 border-none">Confirmer le refus</button>
+                </div>
+              </>
+            )}
+
+            {/* Modal: CORRECTION */}
+            {modalType === 'correction' && (
+              <>
+                <h3 className="text-xl font-bold text-neutral-900 mb-2">Demander des corrections</h3>
+                <p className="text-neutral-500 text-sm mb-4">Le salon restera "En attente" mais verra ce message.</p>
+                <textarea className="input min-h-[100px] mb-6" placeholder="Ex: Veuillez ajouter de meilleures photos..." value={actionMessage} onChange={e => setActionMessage(e.target.value)} autoFocus />
+                <div className="flex gap-3 justify-end">
+                  <button onClick={closeModal} className="btn-ghost">Annuler</button>
+                  <button onClick={handleAction} className="btn-primary bg-amber-600 hover:bg-amber-700 border-none">Envoyer la demande</button>
+                </div>
+              </>
+            )}
+
+            {/* Modal: SUSPENSION */}
+            {modalType === 'suspend' && (
+              <>
+                <h3 className="text-xl font-bold text-neutral-900 mb-2">Suspendre le salon</h3>
+                <p className="text-neutral-500 text-sm mb-4">Le salon n'apparaîtra plus publiquement.</p>
+                <textarea className="input min-h-[100px] mb-6" placeholder="Motif de suspension obligatoire..." value={actionMessage} onChange={e => setActionMessage(e.target.value)} autoFocus />
+                <div className="flex gap-3 justify-end">
+                  <button onClick={closeModal} className="btn-ghost">Annuler</button>
+                  <button onClick={handleAction} className="btn-primary bg-orange-600 hover:bg-orange-700 border-none">Suspendre</button>
+                </div>
+              </>
+            )}
+
+            {/* Modal: DELETE */}
+            {modalType === 'delete' && (
+              <>
+                <h3 className="text-xl font-bold text-red-600 mb-2">Suppression définitive</h3>
+                <p className="text-neutral-600 text-sm mb-4">
+                  Cette action est <strong>irréversible</strong>. Pour confirmer, tapez le nom du salon :<br/>
+                  <span className="font-bold text-neutral-900 select-none bg-neutral-100 px-2 py-0.5 rounded">{selectedSalon?.name}</span>
+                </p>
+                <input type="text" className="input mb-6" value={deleteConfirmText} onChange={e => setDeleteConfirmText(e.target.value)} placeholder="Nom du salon" autoFocus />
+                <div className="flex gap-3 justify-end">
+                  <button onClick={closeModal} className="btn-ghost">Annuler</button>
+                  <button onClick={handleAction} className="btn-primary bg-red-600 hover:bg-red-700 border-none" disabled={deleteConfirmText !== selectedSalon?.name}>Supprimer définitivement</button>
+                </div>
+              </>
+            )}
+
+            {/* Modal: EDIT INFO */}
+            {modalType === 'edit' && (
+              <>
+                <h3 className="text-xl font-bold text-neutral-900 mb-4">Modifier les informations</h3>
+                <div className="space-y-4 mb-6">
+                  <div>
+                    <label className="label">Nom du salon</label>
+                    <input className="input" value={editForm.name || ''} onChange={e => setEditForm({...editForm, name: e.target.value})} />
+                  </div>
+                  <div>
+                    <label className="label">Ville</label>
+                    <input className="input" value={editForm.city || ''} onChange={e => setEditForm({...editForm, city: e.target.value})} />
+                  </div>
+                  <div>
+                    <label className="label">Téléphone</label>
+                    <input className="input" value={editForm.phone || ''} onChange={e => setEditForm({...editForm, phone: e.target.value})} />
+                  </div>
+                  <div>
+                    <label className="label">WhatsApp</label>
+                    <input className="input" value={editForm.whatsapp || ''} onChange={e => setEditForm({...editForm, whatsapp: e.target.value})} />
+                  </div>
+                </div>
+                <div className="flex gap-3 justify-end">
+                  <button onClick={closeModal} className="btn-ghost">Annuler</button>
+                  <button onClick={handleAction} className="btn-primary">Enregistrer</button>
+                </div>
+              </>
+            )}
+
           </div>
         </div>
       )}
