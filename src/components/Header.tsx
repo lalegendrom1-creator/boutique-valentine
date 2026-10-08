@@ -76,7 +76,7 @@ export default function Header() {
                         </Link>
                       </>
                     )}
-                    {(profile?.role === 'salon' || profile?.role === 'admin') && (
+                    {profile?.role === 'salon' && (
                       <Link to="/dashboard" className="flex items-center gap-3 px-4 py-2.5 text-sm text-neutral-700 hover:bg-neutral-50" onClick={() => setUserMenu(false)}>
                         <LayoutDashboard className="w-4 h-4" /> Tableau de bord
                       </Link>
@@ -120,7 +120,7 @@ export default function Header() {
               <hr className="my-2 border-neutral-100" />
               {session ? (
                 <>
-                  {profile?.role === 'salon' || profile?.role === 'admin' ? (
+                  {profile?.role === 'salon' ? (
                     <Link to="/dashboard" className="px-4 py-2.5 text-sm font-medium text-neutral-700 hover:bg-neutral-100 rounded-lg" onClick={() => setMobileOpen(false)}>
                       Tableau de bord
                     </Link>

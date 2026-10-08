@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { AuthProvider } from '@/hooks/useAuth'
 import Layout from '@/components/Layout'
 import ProtectedRoute from '@/components/ProtectedRoute'
+import AdminProtectedRoute from '@/components/AdminProtectedRoute'
 import HomePage from '@/pages/HomePage'
 import SearchPage from '@/pages/SearchPage'
 import SalonDetailPage from '@/pages/SalonDetailPage'
@@ -13,14 +14,17 @@ import AppointmentsPage from '@/pages/AppointmentsPage'
 import FavoritesPage from '@/pages/FavoritesPage'
 import SalonDashboardPage from '@/pages/SalonDashboardPage'
 import AdminDashboardPage from '@/pages/AdminDashboardPage'
+import AdminLoginPage from '@/pages/AdminLoginPage'
 
 export default function App() {
   return (
     <AuthProvider>
       <BrowserRouter>
         <Routes>
+          {/* Espace Public */}
           <Route path="/login" element={<LoginPage />} />
           <Route path="/register" element={<RegisterPage />} />
+          
           <Route element={<Layout />}>
             <Route path="/" element={<HomePage />} />
             <Route path="/search" element={<SearchPage />} />
@@ -58,16 +62,19 @@ export default function App() {
                 </ProtectedRoute>
               }
             />
-            <Route
-              path="/admin"
-              element={
-                <ProtectedRoute roles={['admin']}>
-                  <AdminDashboardPage />
-                </ProtectedRoute>
-              }
-            />
             <Route path="*" element={<HomePage />} />
           </Route>
+
+          {/* Espace Administrateur - Complètement séparé */}
+          <Route path="/admin/login" element={<AdminLoginPage />} />
+          <Route
+            path="/admin"
+            element={
+              <AdminProtectedRoute>
+                <AdminDashboardPage />
+              </AdminProtectedRoute>
+            }
+          />
         </Routes>
       </BrowserRouter>
     </AuthProvider>

@@ -51,6 +51,17 @@ export default function AdminDashboardPage() {
   const [deleteConfirmText, setDeleteConfirmText] = useState('')
   const [editForm, setEditForm] = useState<Partial<Salon>>({})
 
+  /* ── Balise noindex ── */
+  useEffect(() => {
+    let meta = document.querySelector('meta[name="robots"]')
+    if (!meta) {
+      meta = document.createElement('meta')
+      meta.setAttribute('name', 'robots')
+      document.head.appendChild(meta)
+    }
+    meta.setAttribute('content', 'noindex')
+  }, [])
+
   /* ── Déconnexion automatique ── */
   useEffect(() => {
     let timeoutId: NodeJS.Timeout

@@ -19,15 +19,7 @@ export default function LoginPage() {
     setError(null)
     setLoading(true)
 
-    let finalEmail = email
-    
-    // --- RACCOURCI ADMIN ---
-    // Si l'utilisateur tape "admin" dans le champ email avec le mot de passe "valentine1234"
-    if (email.toLowerCase().trim() === 'admin' && password === 'valentine1234') {
-      finalEmail = 'admin@valentine.com' 
-    }
-
-    const { error, role } = await signIn(finalEmail, password)
+    const { error, role } = await signIn(email, password)
     setLoading(false)
     if (error) {
       setError(error)
@@ -39,8 +31,6 @@ export default function LoginPage() {
         // Otherwise use role-based default routing
         if (role === 'salon') {
           navigate('/register-salon')
-        } else if (role === 'admin') {
-          navigate('/admin')
         } else {
           navigate('/')
         }
@@ -66,16 +56,16 @@ export default function LoginPage() {
 
           <form onSubmit={handleSubmit} className="space-y-5">
             <div>
-              <label className="label">Email ou Identifiant</label>
+              <label className="label">Email</label>
               <div className="relative">
                 <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-400" />
                 <input
-                  type="text"
+                  type="email"
                   required
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   className="input pl-10"
-                  placeholder="vous@exemple.com ou admin"
+                  placeholder="vous@exemple.com"
                 />
               </div>
             </div>
