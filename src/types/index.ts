@@ -1,4 +1,4 @@
-export type UserRole = 'client' | 'salon_owner' | 'admin'
+export type UserRole = 'client' | 'salon' | 'admin'
 
 export type SalonStatus = 'pending' | 'approved' | 'suspended' | 'rejected'
 
@@ -15,6 +15,7 @@ export type WeekDay = 0 | 1 | 2 | 3 | 4 | 5 | 6
 export interface Profile {
   id: string
   name: string
+  full_name: string | null
   email: string
   phone: string | null
   role: UserRole
@@ -33,6 +34,14 @@ export interface Salon {
   address: string | null
   city: string | null
   neighborhood: string | null
+  district: string | null
+  manager_name: string | null
+  categories: string[] | null
+  opening_hours: string | null
+  photos: string[] | null
+  proof_url: string | null
+  rejection_reason: string | null
+  reviewed_at: string | null
   latitude: number | null
   longitude: number | null
   logo: string | null

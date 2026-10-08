@@ -18,12 +18,24 @@ export default function LoginPage() {
     e.preventDefault()
     setError(null)
     setLoading(true)
-    const { error } = await signIn(email, password)
+    const { error, role } = await signIn(email, password)
     setLoading(false)
     if (error) {
       setError(error)
     } else {
-      navigate(from)
+      // If we came from a specific page (via ProtectedRoute), go back there
+      if ((location.state as any)?.from) {
+        navigate(from)
+      } else {
+        // Otherwise use role-based default routing
+        if (role === 'salon') {
+          navigate('/register-salon')
+        } else if (role === 'admin') {
+          navigate('/admin')
+        } else {
+          navigate('/')
+        }
+      }
     }
   }
 

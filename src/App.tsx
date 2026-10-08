@@ -53,7 +53,7 @@ export default function App() {
             <Route
               path="/dashboard"
               element={
-                <ProtectedRoute roles={['salon_owner', 'admin']}>
+                <ProtectedRoute roles={['salon', 'admin']}>
                   <SalonDashboardPage />
                 </ProtectedRoute>
               }

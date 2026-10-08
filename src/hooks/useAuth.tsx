@@ -7,8 +7,8 @@ interface AuthContextValue {
   session: Session | null
   profile: Profile | null
   loading: boolean
-  signUp: (email: string, password: string, name: string, role: UserRole) => Promise<{ error: string | null }>
-  signIn: (email: string, password: string) => Promise<{ error: string | null }>
+  signUp: (email: string, password: string, name: string, role: UserRole) => Promise<{ error: string | null; requiresEmailConfirmation: boolean }>
+  signIn: (email: string, password: string) => Promise<{ error: string | null; role: string | null }>
   signOut: () => Promise<void>
   refreshProfile: () => Promise<void>
 }
@@ -62,25 +62,40 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       email,
       password,
       options: {
-        data: { name, role },
+        data: { full_name: name, name, role },
       },
     })
-    if (error) return { error: error.message }
+    if (error) return { error: error.message, requiresEmailConfirmation: false }
 
+    // If data.session is null but data.user exists → email confirmation is required
+    const requiresEmailConfirmation = !!data.user && !data.session
+
+    // Update name in profile — NOT role (the DB trigger already set it correctly)
     if (data.user) {
       await supabase
         .from('profiles')
-        .update({ name, role })
+        .update({ name, full_name: name })
         .eq('id', data.user.id)
     }
 
-    return { error: null }
+    return { error: null, requiresEmailConfirmation }
   }
 
   const signIn = async (email: string, password: string) => {
-    const { error } = await supabase.auth.signInWithPassword({ email, password })
-    if (error) return { error: error.message }
-    return { error: null }
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password })
+    if (error) return { error: error.message, role: null }
+    
+    // Fetch profile to know where to redirect
+    if (data.user) {
+      const { data: profileData } = await supabase
+        .from('profiles')
+        .select('role')
+        .eq('id', data.user.id)
+        .maybeSingle()
+      return { error: null, role: profileData?.role || 'client' }
+    }
+    
+    return { error: null, role: null }
   }
 
   const signOut = async () => {
